@@ -24,6 +24,10 @@
 #include <freertos/task.h>
 #include <ArduinoJson.h>
 #include <WiFiUdp.h>
+#include <nav_msgs/msg/odometry.h>
+#include <geometry_msgs/msg/transform_stamped.h>
+#include <std_msgs/msg/int32.h>
+#include <rmw_microros/rmw_microros.h>
 
 /*==========================================
 =               ROS                        =
@@ -31,8 +35,8 @@
 IPAddress agent_ip(192, 168, 0, 155);
 size_t agent_port = 8888;
 
-char ssid[] = "";
-char psk[] = "";
+char ssid[] = "manojDivya-2.4GHZ";
+char psk[] = "Manoj@24";
 
 rcl_node_t node;
 rclc_support_t support;
@@ -58,6 +62,17 @@ rcl_publisher_t sonar_pub;
 sensor_msgs__msg__Range sonar_msg;
 
 sensor_msgs__msg__LaserScan scan_msg;
+
+rcl_publisher_t odom_pub;
+nav_msgs__msg__Odometry odom_msg;
+
+rcl_publisher_t tf_pub;
+geometry_msgs__msg__TransformStamped transform_msg;
+
+rcl_publisher_t clock_pub;
+std_msgs__msg__Int32 clock_msg;
+bool time_sync_status = false;
+
 /*==========================================
 =               Declarations               =
 ==========================================*/
@@ -175,6 +190,16 @@ enum ErrorCode
 #define SONAR_INIT_RETRIES 3
 #define SONAR_INIT_DELAY 500
 
+double x_pos = 0.0;
+double y_pos = 0.0;
+double theta = 0.0;
+double v_x = 0.0;     // Linear velocity in x
+double v_y = 0.0;     // Linear velocity in y
+double v_theta = 0.0; // Angular velocity
+
+unsigned long last_odom_publish = 0;
+const unsigned long odom_publish_interval = 1000 / 20; // 20Hz
+
 /*==========================================
 =              Function Prototypes         =
 ==========================================*/
@@ -216,6 +241,10 @@ void error_loop();
 bool initializeTimer();
 void setupWatchdog();
 void watchdogCallback();
+bool synchronize_time();
+
+void update_odometry();
+void publish_odometry();
 
 #define RCCHECK(fn)              \
   {                              \
@@ -446,6 +475,34 @@ void setup()
 
   // Initialize UDP
   udp.begin(lidar_udp_port);
+
+  // Initialize odometry publisher
+  RCCHECK(rclc_publisher_init_default(
+      &odom_pub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
+      "odom"));
+
+  // Initialize TF publisher
+
+  RCCHECK(rclc_publisher_init_default(
+      &tf_pub,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, TransformStamped),
+      "tf_odom_geometry_msgs"));
+
+  // Initialize transform message
+  rosidl_runtime_c__String__init(&transform_msg.header.frame_id);
+  rosidl_runtime_c__String__assign(&transform_msg.header.frame_id, "odom");
+  rosidl_runtime_c__String__init(&transform_msg.child_frame_id);
+  rosidl_runtime_c__String__assign(&transform_msg.child_frame_id, "base_footprint");
+
+  // Initialize time sync before creating node
+  if (!synchronize_time())
+  {
+    Serial.println("Time sync failed!");
+    return;
+  }
 }
 
 /*==========================================
@@ -476,35 +533,63 @@ void lidarTask(void *pvParameters)
 
 void mainTask(void *pvParameters)
 {
+  static unsigned long last_sync_time = 0;
+  const unsigned long sync_interval = 10000; // Sync every 10 seconds
+
   while (true)
   {
-    // Only use the executor spin
-    RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
-
-    if (isSonarAvailable)
+    // Periodic time synchronization
+    if (millis() - last_sync_time > sync_interval)
     {
-      updatePing();
+      synchronize_time();
+      last_sync_time = millis();
+    }
 
-      if (millis() - sonar_last_publish_interval > sonar_publish_interval)
+    // Only proceed with ROS operations if time is synchronized
+    if (time_sync_status)
+    {
+      RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+
+      if (isSonarAvailable)
       {
-        sonar_last_publish_interval = millis();
-        sonar_msg.min_range = 0.02;
-        sonar_msg.max_range = 4.0;
-        rosidl_runtime_c__String__init(&sonar_msg.header.frame_id);
-        rosidl_runtime_c__String__assign(&sonar_msg.header.frame_id, "sonar");
-        struct timespec tv = {0};
-        clock_gettime(0, &tv);
-        sonar_msg.header.stamp.nanosec = tv.tv_nsec;
-        sonar_msg.header.stamp.sec = tv.tv_sec;
-        rcl_ret_t ret = rcl_publish(&sonar_pub, &sonar_msg, NULL);
-        if (ret != RCL_RET_OK)
+        updatePing();
+
+        if (millis() - sonar_last_publish_interval > sonar_publish_interval)
         {
-          error_handler(ERROR_COMMUNICATION);
+          sonar_last_publish_interval = millis();
+          sonar_msg.min_range = 0.02;
+          sonar_msg.max_range = 4.0;
+          rosidl_runtime_c__String__init(&sonar_msg.header.frame_id);
+          rosidl_runtime_c__String__assign(&sonar_msg.header.frame_id, "sonar");
+          struct timespec tv = {0};
+          clock_gettime(0, &tv);
+          sonar_msg.header.stamp.nanosec = tv.tv_nsec;
+          sonar_msg.header.stamp.sec = tv.tv_sec;
+          rcl_ret_t ret = rcl_publish(&sonar_pub, &sonar_msg, NULL);
+          if (ret != RCL_RET_OK)
+          {
+            error_handler(ERROR_COMMUNICATION);
+          }
         }
+      }
+
+      // Update odometry calculations
+      update_odometry();
+
+      // Publish odometry at 20Hz
+      if (millis() - last_odom_publish > odom_publish_interval)
+      {
+        int64_t time_ns = rmw_uros_epoch_nanos();
+        odom_msg.header.stamp.sec = time_ns / 1000000000;
+        odom_msg.header.stamp.nanosec = time_ns % 1000000000;
+        transform_msg.header.stamp = odom_msg.header.stamp;
+
+        publish_odometry();
+        last_odom_publish = millis();
       }
     }
 
-    vTaskDelay(1); // Yield to other tasks
+    vTaskDelay(1);
   }
 }
 
@@ -828,20 +913,24 @@ void cleanup_resources()
   // Close communications
   Wire.end();
   LidarSerial.end();
+
+  rmw_uros_sync_session(0); // Disable time sync
 }
 
-void cleanup_ros_resources()
-{
-  rcl_publisher_fini(&sonar_pub, &node);
-  rcl_subscription_fini(&cmd_vel_sub, &node);
-  rcl_subscription_fini(&left_led_sub, &node);
-  rcl_subscription_fini(&right_led_sub, &node);
-  rcl_subscription_fini(&servoA_sub, &node);
-  rcl_subscription_fini(&servoB_sub, &node);
-  rcl_node_fini(&node);
-  rclc_executor_fini(&executor);
-  rclc_support_fini(&support);
-}
+// void cleanup_ros_resources()
+// {
+//   rcl_ret_t rcl_publisher_fini(&sonar_pub, &node);
+//   rcl_subscription_fini(&cmd_vel_sub, &node);
+//   rcl_subscription_fini(&left_led_sub, &node);
+//   rcl_subscription_fini(&right_led_sub, &node);
+//   rcl_subscription_fini(&servoA_sub, &node);
+//   rcl_subscription_fini(&servoB_sub, &node);
+//   rcl_node_fini(&node);
+//   rclc_executor_fini(&executor);
+//   rclc_support_fini(&support);
+//   rcl_publisher_fini(&odom_pub, &node);
+//   rcl_publisher_fini(&tf_pub, &node);
+// }
 
 void send_lidar_data_udp(const sensor_msgs__msg__LaserScan &scan_msg)
 {
@@ -865,4 +954,86 @@ void send_lidar_data_udp(const sensor_msgs__msg__LaserScan &scan_msg)
   udp.beginPacket(agent_ip, lidar_udp_port);
   udp.print(jsonString);
   udp.endPacket();
+}
+
+void update_odometry()
+{
+  // Calculate time difference
+  static unsigned long last_time = 0;
+  unsigned long current_time = millis();
+  double dt = (current_time - last_time) / 1000.0; // Convert to seconds
+  last_time = current_time;
+
+  // Calculate wheel velocities in m/s
+  double left_wheel_vel = (left_encoder_diff / encoder_ticks_per_mtr) / dt;
+  double right_wheel_vel = (right_encoder_diff / encoder_ticks_per_mtr) / dt;
+
+  // Calculate robot velocities
+  double linear_vel = (right_wheel_vel + left_wheel_vel) / 2.0;
+  double angular_vel = (right_wheel_vel - left_wheel_vel) / wheel_distance;
+
+  // Update position
+  double delta_x = linear_vel * cos(theta) * dt;
+  double delta_y = linear_vel * sin(theta) * dt;
+  double delta_theta = angular_vel * dt;
+
+  x_pos += delta_x;
+  y_pos += delta_y;
+  theta += delta_theta;
+
+  // Store velocities for odometry message
+  v_x = linear_vel * cos(theta);
+  v_y = linear_vel * sin(theta);
+  v_theta = angular_vel;
+}
+
+void publish_odometry()
+{
+  odom_msg.pose.pose.position.x = x_pos;
+  odom_msg.pose.pose.position.y = y_pos;
+  odom_msg.pose.pose.position.z = 0.0;
+
+  // Convert theta to quaternion (rotation around Z axis)
+  double cy = cos(theta * 0.5);
+  double sy = sin(theta * 0.5);
+  odom_msg.pose.pose.orientation.x = 0.0;
+  odom_msg.pose.pose.orientation.y = 0.0;
+  odom_msg.pose.pose.orientation.z = sy;
+  odom_msg.pose.pose.orientation.w = cy;
+
+  odom_msg.twist.twist.linear.x = v_x;
+  odom_msg.twist.twist.linear.y = v_y;
+  odom_msg.twist.twist.angular.z = v_theta;
+
+  RCSOFTCHECK(rcl_publish(&odom_pub, &odom_msg, NULL));
+
+  // Prepare and publish transform message
+  transform_msg.header.stamp = odom_msg.header.stamp;
+  transform_msg.transform.translation.x = x_pos;
+  transform_msg.transform.translation.y = y_pos;
+  transform_msg.transform.translation.z = 0.0;
+  transform_msg.transform.rotation = odom_msg.pose.pose.orientation;
+
+  RCSOFTCHECK(rcl_publish(&tf_pub, &transform_msg, NULL));
+}
+
+bool synchronize_time()
+{
+  // Try to synchronize time with the agent
+  static bool first_sync = true;
+  if (first_sync)
+  {
+    Serial.println("Synchronizing time with agent...");
+    first_sync = false;
+  }
+
+  rmw_ret_t ret = rmw_uros_sync_session(1000);
+  if (ret != RMW_RET_OK)
+  {
+    time_sync_status = false;
+    return false;
+  }
+
+  time_sync_status = true;
+  return true;
 }

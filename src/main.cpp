@@ -124,11 +124,11 @@ float left_demand_speed = 0.0;
 float right_demand_speed = 0.0;
 
 // PID Delarations
-double right_kp = 2.3, right_ki = 2, right_kd = 1;
+double right_kp = 5.0, right_ki = 2.0, right_kd = 0.1; // More aggressive values
 double right_speed_actual = 0, right_speed_output = 0, right_speed_setpoint = 0;
 PID right_wheel_pid(&right_speed_actual, &right_speed_output, &right_speed_setpoint, right_kp, right_ki, right_kd, DIRECT);
 
-double left_kp = 2.3, left_ki = 2, left_kd = 1;
+double left_kp = 5.0, left_ki = 2.0, left_kd = 0.1; // More aggressive values
 double left_speed_actual = 0, left_speed_output = 0, left_speed_setpoint = 0;
 PID left_wheel_pid(&left_speed_actual, &left_speed_output, &left_speed_setpoint, left_kp, left_ki, left_kd, DIRECT);
 
@@ -535,7 +535,6 @@ void mainTask(void *pvParameters)
 {
   static unsigned long last_sync_time = 0;
   const unsigned long sync_interval = 10000; // Sync every 10 seconds
-
   while (true)
   {
     // Periodic time synchronization
@@ -572,9 +571,6 @@ void mainTask(void *pvParameters)
           }
         }
       }
-
-      // Update odometry calculations
-      update_odometry();
 
       // Publish odometry at 20Hz
       if (millis() - last_odom_publish > odom_publish_interval)
@@ -638,6 +634,7 @@ void IRAM_ATTR encoderTimerISR()
   right_wheel_pid.Compute();
 
   rotateMotor(left_speed_output, right_speed_output);
+  update_odometry();
 }
 // rotate motor
 void rotateMotor(int left_speed, int right_speed)
@@ -688,8 +685,17 @@ void cmd_vel_callback(const void *msgin)
   const geometry_msgs__msg__Twist *msg_twist = (const geometry_msgs__msg__Twist *)msgin;
   linear_x = msg_twist->linear.x;
   angular_z = msg_twist->angular.z;
-  left_demand_speed = linear_x - angular_z * (wheel_distance / 2.0);
-  right_demand_speed = linear_x + angular_z * (wheel_distance / 2.0);
+
+  // Convert twist to wheel velocities
+  // v_l = v - (L/2)ω
+  // v_r = v + (L/2)ω
+  left_demand_speed = linear_x - (wheel_distance / 2.0) * angular_z;
+  right_demand_speed = linear_x + (wheel_distance / 2.0) * angular_z;
+
+  // Optional: Add velocity limits
+  const float MAX_WHEEL_SPEED = 1.0; // meters per second
+  left_demand_speed = constrain(left_demand_speed, -MAX_WHEEL_SPEED, MAX_WHEEL_SPEED);
+  right_demand_speed = constrain(right_demand_speed, -MAX_WHEEL_SPEED, MAX_WHEEL_SPEED);
 }
 
 void left_led_callback(const void *left_led_msg)
@@ -698,7 +704,7 @@ void left_led_callback(const void *left_led_msg)
   if (msg_led->a <= 255 && msg_led->a >= 0)
     leds.setBrightness(msg_led->a);
   if ((msg_led->r >= 0 && msg_led->r <= 255) && (msg_led->g >= 0 && msg_led->g <= 255) && (msg_led->b >= 0 && msg_led->b <= 255))
-    leds.setPixelColor(1, leds.Color(msg_led->r, msg_led->g, msg_led->b));
+    leds.setPixelColor(0, leds.Color(msg_led->r, msg_led->g, msg_led->b));
   leds.show();
 }
 void right_led_callback(const void *right_led_msg)
@@ -707,7 +713,7 @@ void right_led_callback(const void *right_led_msg)
   if (msg_led->a <= 255 && msg_led->a >= 0)
     leds.setBrightness(msg_led->a);
   if ((msg_led->r >= 0 && msg_led->r <= 255) && (msg_led->g >= 0 && msg_led->g <= 255) && (msg_led->b >= 0 && msg_led->b <= 255))
-    leds.setPixelColor(0, leds.Color(msg_led->r, msg_led->g, msg_led->b));
+    leds.setPixelColor(1, leds.Color(msg_led->r, msg_led->g, msg_led->b));
   leds.show();
 }
 void servoA_callback(const void *msg)
@@ -958,28 +964,46 @@ void send_lidar_data_udp(const sensor_msgs__msg__LaserScan &scan_msg)
 
 void update_odometry()
 {
-  // Calculate time difference
   static unsigned long last_time = 0;
   unsigned long current_time = millis();
   double dt = (current_time - last_time) / 1000.0; // Convert to seconds
+  if (dt < 0.0001)
+    return; // Avoid extremely small time differences
   last_time = current_time;
 
-  // Calculate wheel velocities in m/s
-  double left_wheel_vel = (left_encoder_diff / encoder_ticks_per_mtr) / dt;
-  double right_wheel_vel = (right_encoder_diff / encoder_ticks_per_mtr) / dt;
+  // Calculate wheel distances in meters
+  // Make sure encoder_ticks_per_mtr is correctly calibrated!
+  // For example, if moving 1 meter gives 1741 ticks:
+  double d_left = (double)(left_encoder_diff) / encoder_ticks_per_mtr;
+  double d_right = (double)(right_encoder_diff) / encoder_ticks_per_mtr;
 
-  // Calculate robot velocities
-  double linear_vel = (right_wheel_vel + left_wheel_vel) / 2.0;
-  double angular_vel = (right_wheel_vel - left_wheel_vel) / wheel_distance;
+  // Calculate distance traveled and angle change
+  double d = (d_left + d_right) / 2.0;                  // Distance traveled by robot center
+  double d_theta = (d_right - d_left) / wheel_distance; // Change in orientation
 
-  // Update position
-  double delta_x = linear_vel * cos(theta) * dt;
-  double delta_y = linear_vel * sin(theta) * dt;
-  double delta_theta = angular_vel * dt;
+  // Calculate velocities
+  double linear_vel = d / dt;        // Linear velocity
+  double angular_vel = d_theta / dt; // Angular velocity
 
-  x_pos += delta_x;
-  y_pos += delta_y;
-  theta += delta_theta;
+  // Only update position if there's significant movement
+  if (abs(d) > 0.00001)
+  {
+    // Use average orientation during the movement for better accuracy
+    double delta_heading = theta + (d_theta / 2.0);
+
+    // Update position
+    x_pos += d * cos(delta_heading);
+    y_pos += d * sin(delta_heading);
+  }
+
+  // Update orientation
+  theta += d_theta;
+
+  // Normalize theta to -π to +π
+  while (theta > M_PI)
+    theta -= 2 * M_PI;
+  while (theta < -M_PI)
+    theta += 2 * M_PI;
 
   // Store velocities for odometry message
   v_x = linear_vel * cos(theta);

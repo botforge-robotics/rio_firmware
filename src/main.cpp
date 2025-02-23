@@ -32,11 +32,13 @@
 /*==========================================
 =               ROS                        =
 ==========================================*/
-IPAddress agent_ip(192, 168, 0, 155);
-size_t agent_port = 8888;
+// WiFi Configuration
+char ssid[] = "YourWiFiNetworkName"; // Your WiFi Network Name
+char psk[] = "YourWiFiPassword";     // Your WiFi Password
 
-char ssid[] = "manojDivya-2.4GHZ";
-char psk[] = "Manoj@24";
+// Static IP Configuration
+IPAddress agent_ip(192, 168, 0, 121); // Desired Static IP
+size_t agent_port = 8888;             // Communication Port
 
 rcl_node_t node;
 rclc_support_t support;

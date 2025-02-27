@@ -68,12 +68,13 @@ size_t agent_port = 8888;                // Communication Port
    - Click "Upload" (➡️ icon)
    - Or use Terminal: `platformio run -t upload`
 
-## 🔍 Troubleshooting
 
 ## Related Repositories
 - 🔧 [RIO Harware](https://github.com/botforge-robotics/rio_hardware) - RIO robot hardware parts and assembly
 - 🤖 [RIO ROS2](https://github.com/botforge-robotics/rio_ros2) - ROS2 packages for navigation, control, and sensor integration
 
+
+## 🔍 Troubleshooting
 ### Common Issues
 - ❗ Incorrect COM Port
 - ❗ Driver Problems

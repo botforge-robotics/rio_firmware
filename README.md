@@ -1,3 +1,6 @@
+<p align="center">
+    <img src="https://img.shields.io/badge/🚀%20COMING%20SOON-brightgreen?style=for-the-badge" width="300" alt="Coming Soon"/>
+</p>
 <div align="center">
     <img src="https://img.shields.io/github/stars/botforge-robotics/rio_firmware?style=social&logo=github" alt="Stars">&nbsp;
     <img src="https://img.shields.io/github/forks/botforge-robotics/rio_firmware?style=social&logo=github" alt="Forks">&nbsp;
@@ -66,6 +69,10 @@ size_t agent_port = 8888;                // Communication Port
    - Or use Terminal: `platformio run -t upload`
 
 ## 🔍 Troubleshooting
+
+## Related Repositories
+- 🔧 [RIO Harware](https://github.com/botforge-robotics/rio_hardware) - RIO robot hardware parts and assembly
+- 🤖 [RIO ROS2](https://github.com/botforge-robotics/rio_ros2) - ROS2 packages for navigation, control, and sensor integration
 
 ### Common Issues
 - ❗ Incorrect COM Port

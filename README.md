@@ -1,6 +1,4 @@
-<p align="center">
-    <img src="https://img.shields.io/badge/🚀%20COMING%20SOON-brightgreen?style=for-the-badge" width="300" alt="Coming Soon"/>
-</p>
+
 <div align="center">
     <img src="https://img.shields.io/github/stars/botforge-robotics/rio_firmware?style=social&logo=github" alt="Stars">&nbsp;
     <img src="https://img.shields.io/github/forks/botforge-robotics/rio_firmware?style=social&logo=github" alt="Forks">&nbsp;
